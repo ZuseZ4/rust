@@ -29,10 +29,6 @@ pub(crate) struct OffloadGlobals<'ll> {
     pub mapper_fn_ty: &'ll llvm::Type,
 
     pub ident_t_global: &'ll llvm::Value,
-
-    // FIXME(offload): Drop this, once we fully automated our offload compilation pipeline, since
-    // LLVM will initialize them for us if it sees gpu kernels being registered.
-    pub init_rtls: &'ll llvm::Value,
 }
 
 impl<'ll> OffloadGlobals<'ll> {
@@ -42,9 +38,6 @@ impl<'ll> OffloadGlobals<'ll> {
         let offload_entry_ty = TgtOffloadEntry::new_decl(cx);
         let (begin_mapper, _, end_mapper, mapper_fn_ty) = gen_tgt_data_mappers(cx);
         let ident_t_global = generate_at_one(cx);
-
-        let init_ty = cx.type_func(&[], cx.type_void());
-        let init_rtls = declare_offload_fn(cx, "__tgt_init_all_rtls", init_ty);
 
         // We want LLVM's openmp-opt pass to pick up and optimize this module, since it covers both
         // openmp and offload optimizations.
@@ -59,7 +52,6 @@ impl<'ll> OffloadGlobals<'ll> {
             end_mapper,
             mapper_fn_ty,
             ident_t_global,
-            init_rtls,
         }
     }
 }
@@ -92,6 +84,12 @@ pub(crate) fn register_offload<'ll>(cx: &CodegenCx<'ll, '_>) {
     let atexit = cx.type_func(&[cx.type_ptr()], cx.type_i32());
     let atexit_fn = declare_offload_fn(cx, "atexit", atexit);
 
+    // FIXME(offload): Drop this, once we fully automated our offload compilation pipeline, since
+    // LLVM will initialize them for us if it sees gpu kernels being registered. Until then, we at
+    // least moved it to the global ctor, so it doesn't interfere with LLVM opts.
+    let init_ty = cx.type_func(&[], cx.type_void());
+    let init_rtls = declare_offload_fn(cx, "__tgt_init_all_rtls", init_ty);
+
     let desc_ty = cx.type_func(&[], cx.type_void());
     let reg_name = ".omp_offloading.descriptor_reg";
     let unreg_name = ".omp_offloading.descriptor_unreg";
@@ -105,12 +103,14 @@ pub(crate) fn register_offload<'ll>(cx: &CodegenCx<'ll, '_>) {
     // define internal void @.omp_offloading.descriptor_reg() section ".text.startup" {
     // entry:
     //   call void @__tgt_register_lib(ptr @.omp_offloading.descriptor)
+    //   call void @__tgt_init_all_rtls()
     //   %0 = call i32 @atexit(ptr @.omp_offloading.descriptor_unreg)
     //   ret void
     // }
     let bb = Builder::append_block(cx, desc_reg_fn, "entry");
     let mut a = Builder::build(cx, bb);
     a.call(reg_lib_decl, None, None, register_lib, &[omp_descriptor], None, None);
+    a.call(init_ty, None, None, init_rtls, &[], None, None);
     a.call(atexit, None, None, atexit_fn, &[desc_unreg_fn], None, None);
     a.ret_void();
 
@@ -654,12 +654,6 @@ pub(crate) fn gen_call_handling<'ll, 'tcx>(
         vals.push(base_val);
         geps.push(gep);
     }
-
-    let init_ty = cx.type_func(&[], cx.type_void());
-    let init_rtls_decl = offload_globals.init_rtls;
-
-    // call void @__tgt_init_all_rtls()
-    builder.call(init_ty, None, None, init_rtls_decl, &[], None, None);
 
     for i in 0..num_args {
         let idx = cx.get_const_i32(i);

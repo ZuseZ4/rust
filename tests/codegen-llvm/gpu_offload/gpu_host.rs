@@ -62,7 +62,6 @@ pub fn _kernel_1(x: &mut [f32; 256], y: &[f32; 256]) {
 // CHECK-NEXT:   %kernel_args = alloca %struct.__tgt_kernel_arguments, align 8
 // CHECK:   %dummy = load volatile ptr, ptr @.offload_sizes.[[K]], align 8
 // CHECK-NEXT:   %dummy4 = load volatile ptr, ptr @.offloading.entry.[[K]], align 8
-// CHECK-NEXT:   call void @__tgt_init_all_rtls()
 // CHECK-NEXT:   store ptr %x, ptr %.offload_baseptrs, align 8
 // CHECK-NEXT:   store ptr %x, ptr %.offload_ptrs, align 8
 // CHECK-NEXT:   store i64 1024, ptr %.offload_sizes, align 8
@@ -105,6 +104,7 @@ pub fn _kernel_1(x: &mut [f32; 256], y: &[f32; 256]) {
 // CHECK-LABEL: define internal void @.omp_offloading.descriptor_reg() section ".text.startup" {
 // CHECK-NEXT: entry:
 // CHECK-NEXT:   call void @__tgt_register_lib(ptr nonnull @.omp_offloading.descriptor)
+// CHECK-NEXT:   call void @__tgt_init_all_rtls()
 // CHECK-NEXT:   %0 = {{tail }}call i32 @atexit(ptr nonnull @.omp_offloading.descriptor_unreg)
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
