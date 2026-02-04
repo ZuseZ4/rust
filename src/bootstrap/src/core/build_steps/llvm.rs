@@ -1140,7 +1140,7 @@ impl Step for Enzyme {
         let llvm_version_major = llvm::get_llvm_version_major(builder, &host_llvm_config);
         let lib_ext = std::env::consts::DLL_EXTENSION;
         let libenzyme = format!("libEnzyme-{llvm_version_major}");
-        let build_dir = out_dir.join("lib");
+        let build_dir = out_dir.join("bin");
         let dylib = build_dir.join(&libenzyme).with_extension(lib_ext);
 
         trace!("checking build stamp to see if we need to rebuild enzyme artifacts");
@@ -1203,6 +1203,7 @@ impl Step for Enzyme {
         // At this point, `out_dir` should contain the built libEnzyme-<LLVM-version>.<dylib-ext>
         // file.
         if !dylib.exists() {
+            eprintln!("{} does not exist", dylib.display());
             eprintln!(
                 "`{libenzyme}` not found in `{}`. Either the build has failed or Enzyme was built with a wrong version of LLVM",
                 build_dir.display()
