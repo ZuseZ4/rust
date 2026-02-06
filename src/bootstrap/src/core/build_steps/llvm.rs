@@ -1058,6 +1058,12 @@ impl Step for OmpOffload {
                 .define("OFFLOAD_INCLUDE_TESTS", "OFF")
                 .define("LLVM_ROOT", builder.llvm_out(target).join("build"))
                 .define("LLVM_DIR", llvm_cmake_dir.clone())
+                // Verify whether per-target-runtime-dir is needed
+                .define("LLVM_ENABLE_PER_TARGET_RUNTIME_DIR", "ON")
+                // Verify whether this one is needed.
+                .define("OPENMP_STANDALONE_BUILD", "ON")
+                .define("CMAKE_CXX_COMPILER_WORKS", "TRUE")
+                .define("CMAKE_C_COMPILER_WORKS", "TRUE")
                 .define("LLVM_DEFAULT_TARGET_TRIPLE", omp_target);
             if let Some(p) = clang_dir.clone() {
                 cfg.define("Clang_DIR", p);
@@ -1067,11 +1073,14 @@ impl Step for OmpOffload {
             // will still be a CPU target.
             if *omp_target == *target.triple {
                 // The offload library provides functionality which only makes sense on the host.
-                cfg.define("LLVM_ENABLE_RUNTIMES", "openmp;offload");
+                // Verify whether libc is needed on the host
+                cfg.define("LLVM_ENABLE_RUNTIMES", "openmp;offload;libc");
             } else {
                 // OpenMP provides some device libraries, so we also compile it for all gpu targets.
+                cfg.define("LIBC_TARGET_TRIPLE", omp_target);
                 cfg.define("LLVM_USE_LINKER", "lld");
-                cfg.define("LLVM_ENABLE_RUNTIMES", "openmp");
+                cfg.define("LLVM_LIBC_FULL_BUILD", "ON");
+                cfg.define("LLVM_ENABLE_RUNTIMES", "openmp;libc");
                 cfg.define("CMAKE_C_COMPILER_TARGET", omp_target);
                 cfg.define("CMAKE_CXX_COMPILER_TARGET", omp_target);
             }
