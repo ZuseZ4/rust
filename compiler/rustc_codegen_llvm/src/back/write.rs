@@ -826,34 +826,47 @@ pub(crate) unsafe fn llvm_optimize(
     // LLVM-IR host module, to create a `host.o` ObjectFile, which we will write to disk.
     // The last, not yet automated steps uses the `clang-linker-wrapper` to process `host.o`.
     if !cgcx.target_is_like_gpu {
-        if let Some(device_path) = config
+        if let Some(device_paths) = config
             .offload
             .iter()
-            .find_map(|o| if let config::Offload::Host(path) = o { Some(path) } else { None })
+            .find_map(|o| if let config::Offload::Host(paths) = o { Some(paths) } else { None })
         {
-            let device_pathbuf = PathBuf::from(device_path);
-            if device_pathbuf.is_relative() {
-                dcx.emit_err(crate::errors::OffloadWithoutAbsPath);
-            } else if device_pathbuf
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n != "host.out")
-            {
-                dcx.emit_err(crate::errors::OffloadWrongFileName);
-            } else if !device_pathbuf.exists() {
-                dcx.emit_err(crate::errors::OffloadNonexistingPath);
+            let mut device_binaries: Vec<CString> = vec![];
+            for device_path in device_paths {
+                let device_pathbuf = PathBuf::from(device_path);
+                if device_pathbuf.is_relative() {
+                    dcx.emit_err(crate::errors::OffloadWithoutAbsPath);
+                } else if device_pathbuf
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n != "host.out")
+                {
+                    dcx.emit_err(crate::errors::OffloadWrongFileName);
+                } else if !device_pathbuf.exists() {
+                    dcx.emit_err(crate::errors::OffloadNonexistingPath);
+                }
+                let host_out_c = path_to_c_string(device_pathbuf.as_path());
+                device_binaries.push(host_out_c);
             }
+            // gotta love ffi
+            let device_binary_ptrs: Vec<*const c_char> =
+                device_binaries.iter().map(|s| s.as_ptr()).collect();
+
             let host_path = cgcx.output_filenames.path(OutputType::Object);
             let host_dir = host_path.parent().unwrap();
             let out_obj = host_dir.join("host.o");
-            let host_out_c = path_to_c_string(device_pathbuf.as_path());
 
             // 2) Finalize host: lib.bc + host.out -> host.o (host TM)
             // We create a full clone of our LLVM host module, since we will embed the device IR
             // into it, and this might break caching or incremental compilation otherwise.
             let llmod2 = llvm::LLVMCloneModule(module.module_llvm.llmod());
-            let ok =
-                unsafe { llvm::LLVMRustOffloadEmbedBufferInModule(llmod2, host_out_c.as_ptr()) };
+            let ok = unsafe {
+                llvm::LLVMRustOffloadEmbedBufferInModule(
+                    llmod2,
+                    device_binary_ptrs.as_ptr(),
+                    device_binary_ptrs.len() as i32,
+                )
+            };
             if !ok {
                 dcx.emit_err(crate::errors::OffloadEmbedFailed);
             }

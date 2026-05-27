@@ -209,18 +209,21 @@ extern "C" bool LLVMRustBundleImages(LLVMModuleRef M, TargetMachine &TM,
 }
 
 extern "C" bool LLVMRustOffloadEmbedBufferInModule(LLVMModuleRef HostM,
-                                                   const char *HostOutPath) {
-  auto MBOrErr = MemoryBuffer::getFile(HostOutPath);
-  if (!MBOrErr) {
-    auto E = MBOrErr.getError();
-    auto _B = errorCodeToError(E);
-    return false;
+                                                   const char *const *HostOutPaths, int num_paths) {
+  for (int i=0; i < num_paths; i++) {
+    const char *HostOutPath = HostOutPaths[i];
+    auto MBOrErr = MemoryBuffer::getFile(HostOutPath);
+    if (!MBOrErr) {
+      auto E = MBOrErr.getError();
+      auto _B = errorCodeToError(E);
+      return false;
+    }
+    MemoryBufferRef Buf = (*MBOrErr)->getMemBufferRef();
+    Module *M = unwrap(HostM);
+    StringRef SectionName = ".llvm.offloading";
+    Align Alignment = Align(8);
+    llvm::embedBufferInModule(*M, Buf, SectionName, Alignment);
   }
-  MemoryBufferRef Buf = (*MBOrErr)->getMemBufferRef();
-  Module *M = unwrap(HostM);
-  StringRef SectionName = ".llvm.offloading";
-  Align Alignment = Align(8);
-  llvm::embedBufferInModule(*M, Buf, SectionName, Alignment);
   return true;
 }
 

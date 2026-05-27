@@ -1420,7 +1420,9 @@ pub mod parse {
             let variant = match key {
                 "Host" => {
                     if let Some(p) = arg {
-                        Offload::Host(p.to_string())
+                        let host_paths: Vec<String> =
+                            p.to_string().split(",").map(|s| s.to_owned()).collect();
+                        Offload::Host(host_paths)
                     } else {
                         return false;
                     }

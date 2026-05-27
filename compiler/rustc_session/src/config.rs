@@ -195,7 +195,7 @@ pub enum Offload {
     /// Entry point for `std::offload`, enables kernel compilation for a gpu device
     Device,
     /// Second step in the offload pipeline, generates the host code to call kernels.
-    Host(String),
+    Host(Vec<String>),
     /// Test is similar to Host, but allows testing without a device artifact.
     Test,
 }

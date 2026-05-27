@@ -1688,7 +1688,8 @@ mod Offload {
         ) -> bool;
         pub(crate) unsafe fn LLVMRustOffloadEmbedBufferInModule<'a>(
             _M: &'a Module,
-            _host_out: *const c_char,
+            _host_out: *const *const c_char,
+            _len: c_int,
         ) -> bool;
         pub(crate) fn LLVMRustOffloadMapper<'a>(
             OldFn: &'a Value,
@@ -1716,7 +1717,8 @@ mod Offload_fallback {
     }
     pub(crate) unsafe fn LLVMRustOffloadEmbedBufferInModule<'a>(
         _M: &'a Module,
-        _host_out: *const c_char,
+        _host_out: *const *const c_char,
+        _len: c_int,
     ) -> bool {
         unimplemented!("This rustc version was not built with LLVM Offload support!");
     }
