@@ -1882,7 +1882,6 @@ fn codegen_offload_preload_drop<'ll, 'tcx>(
     args: &[OperandRef<'tcx, &'ll llvm::Value>],
 ) {
     let cx = bx.cx;
-    dbg!("Starting the PreloadMut drop handling!");
     // PreloadMut<'a, T> -> extract T.
     let ptr_arg = &args[0];
     let is_mut: bool = offload_bool_arg(args, 1);
@@ -1909,7 +1908,6 @@ fn codegen_offload_preload_drop<'ll, 'tcx>(
         // We still want the refcounter to go down, so the runtime nows when it can free the data.
         meta.mode |= MappingFlags::NONE;
     }
-    dbg!(&meta);
     let metadata: &[OffloadMetadata; 1] = &[meta];
 
     let types: &Type = cx.layout_of(pointee_ty).llvm_type(cx);
@@ -1924,7 +1922,6 @@ fn codegen_offload_preload_drop<'ll, 'tcx>(
     };
 
     let target_symbol = cx.generate_local_symbol_name("");
-    dbg!("done for now");
     let offload_data =
         gen_define_handling(&cx, metadata, target_symbol, offload_globals, TransferType::End);
     let has_dynamic = metadata.iter().any(|m| !matches!(m.payload_size, OffloadSize::Static(_)));
@@ -1972,7 +1969,6 @@ fn codegen_offload_preload<'ll, 'tcx>(
     _instance: ty::Instance<'tcx>,
     args: &[OperandRef<'tcx, &'ll Value>],
 ) {
-    dbg!("Starting the preload handling!");
     let cx = bx.cx;
     register_offload(cx);
 
@@ -2002,7 +1998,6 @@ fn codegen_offload_preload<'ll, 'tcx>(
             return;
         }
     };
-    dbg!("asdf");
     let target_symbol = cx.generate_local_symbol_name("");
     let offload_data =
         gen_define_handling(&cx, metadata, target_symbol, offload_globals, TransferType::Begin);
