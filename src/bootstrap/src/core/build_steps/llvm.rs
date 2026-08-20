@@ -1289,27 +1289,7 @@ impl CommandLineStep for OmpOffload {
         // we built our own clang based on the llvm submodule first, this always works. The
         // alternative is that the user sets the offload_clang_dir path, in which case they hopefully point
         // to a suitable clang, otherwise the build will fail.
-        let clang_bin_dir = if builder.config.llvm_clang {
-            llvm_output.host_llvm_config.parent().map(Path::to_path_buf)
-        } else {
-            // We expect the following (default) structure of the offload_clang_dir:
-            // <prefix>/lib/cmake/clang, with a ClangConfig.cmake inside.
-            // The clang binary is located in <prefix>/bin, so we go up three levels to find it.
-            // This hardcodes the ClangConfig.cmake logic, which isn't great, so we filter for the
-            // binary and error if we can't find it (presumably because LLVM build layout changed?).
-            offload_clang_dir
-                .as_deref()
-                .and_then(|dir| dir.ancestors().nth(3))
-                .map(|prefix| prefix.join("bin"))
-        }
-        .filter(|dir| dir.join(exe("clang", target)).exists());
-
-        let Some(clang_bin_dir) = clang_bin_dir else {
-            eprintln!(
-                "Building Offload requires a clang binary. Please either set `llvm.offload-clang-dir` or enable `llvm.clang` to build it."
-            );
-            helpers::exit_process(1);
-        };
+        let clang_bin_dir = offload_clang_bin_dir(builder, target, &llvm_output);
         let clang = clang_bin_dir.join(exe("clang", target));
         let clangxx = clang_bin_dir.join(exe("clang++", target));
 
@@ -1401,6 +1381,186 @@ impl CommandLineStep for OmpOffload {
             }
         }
         BuiltOmpOffload { offload: files }
+    }
+}
+
+fn offload_clang_bin_dir(
+    builder: &Builder<'_>,
+    target: TargetSelection,
+    llvm_output: &LlvmOutput,
+) -> PathBuf {
+    let clang_bin_dir = if builder.config.llvm_clang {
+        llvm_output.host_llvm_config.parent().map(Path::to_path_buf)
+    } else {
+        // We expect the following (default) structure of the offload_clang_dir:
+        // <prefix>/lib/cmake/clang, with a ClangConfig.cmake inside.
+        // The clang binary is located in <prefix>/bin, so we go up three levels to find it.
+        // This hardcodes the ClangConfig.cmake logic, which isn't great, so we filter for the
+        // binary and error if we can't find it (presumably because LLVM build layout changed?).
+        builder
+            .config
+            .offload_clang_dir
+            .as_deref()
+            .and_then(|dir| dir.ancestors().nth(3))
+            .map(|prefix| prefix.join("bin"))
+    }
+    .filter(|dir| dir.join(exe("clang", target)).exists());
+
+    let Some(clang_bin_dir) = clang_bin_dir else {
+        eprintln!(
+            "Building Offload requires a clang binary. Please either set `llvm.offload-clang-dir` or enable `llvm.clang` to build it."
+        );
+        helpers::exit_process(1);
+    };
+    clang_bin_dir
+}
+
+pub const GPU_TARGETS: &[&str] = &["amdgcn-amd-amdhsa", "nvptx64-nvidia-cuda"];
+
+const GPU_LIBC_FILES: &[&str] = &["libc.a", "libm.a", "crt1.o"];
+
+#[derive(Clone)]
+pub struct BuiltGpuLibc {
+    libs: Vec<PathBuf>,
+}
+
+impl BuiltGpuLibc {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.libs
+    }
+}
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct GpuLibc {
+    pub target: TargetSelection,
+    pub gpu_target: &'static str,
+}
+
+impl CommandLineStep for GpuLibc {
+    type Output = BuiltGpuLibc;
+    const IS_HOST: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.alias("gpu-libc")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        for &gpu_target in GPU_TARGETS {
+            run.builder.ensure(GpuLibc { target: run.target, gpu_target });
+        }
+    }
+
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
+        let target = self.target;
+        let gpu_target = self.gpu_target;
+
+        let out_dir = builder.offload_out(target).join(gpu_target);
+        let files: Vec<PathBuf> =
+            GPU_LIBC_FILES.iter().map(|f| out_dir.join("lib").join(gpu_target).join(f)).collect();
+
+        if builder.config.dry_run() {
+            return BuiltGpuLibc { libs: files };
+        }
+
+        let llvm_output = builder.ensure(Llvm { target });
+
+        static STAMP_HASH_MEMO: OnceLock<String> = OnceLock::new();
+        let smart_stamp_hash = STAMP_HASH_MEMO.get_or_init(|| {
+            generate_smart_stamp_hash(
+                builder,
+                &builder.config.src.join("src/llvm-project/libc"),
+                builder.in_tree_llvm_info.sha().unwrap_or_default(),
+            )
+        });
+        let stamp = BuildStamp::new(&out_dir).with_prefix("gpu-libc").add_stamp(smart_stamp_hash);
+
+        trace!("checking build stamp to see if we need to rebuild the gpu libc");
+        if stamp.is_up_to_date() {
+            trace!(?out_dir, "gpu libc build artifacts are up to date");
+            return BuiltGpuLibc { libs: files };
+        }
+
+        trace!(?target, ?gpu_target, "(re)building the gpu libc");
+        let _guard = builder.msg_unstaged(Kind::Build, "gpu-libc", target);
+        t!(stamp.remove());
+        let _time = helpers::timeit(builder);
+        t!(fs::create_dir_all(&out_dir));
+
+        builder.config.update_submodule("src/llvm-project");
+
+        let clang_bin_dir = offload_clang_bin_dir(builder, target, &llvm_output);
+        let clang = clang_bin_dir.join(exe("clang", target));
+        let clangxx = clang_bin_dir.join(exe("clang++", target));
+
+        let mut program_dirs = vec![clang_bin_dir.clone()];
+        if !clang_bin_dir.join(exe("ld.lld", target)).exists() {
+            program_dirs.push(builder.ensure(Lld { target }).join("bin"));
+        }
+        let program_flags =
+            program_dirs.iter().map(|d| format!("-B{}", d.display())).collect::<Vec<_>>().join(" ");
+
+        let mut cfg = cmake::Config::new(builder.src.join("src/llvm-project/runtimes/"));
+
+        configure_cmake(
+            builder,
+            target,
+            &mut cfg,
+            true,
+            LdFlags::default(),
+            CcFlags::default(),
+            &[],
+        );
+
+        let profile = get_llvm_profile(&builder.config);
+        trace!(?profile);
+
+        let llvm_version_major = get_llvm_version_major(builder, &llvm_output.host_llvm_config);
+
+        if llvm_output.link_shared() {
+            let mut dylib_path = vec![builder.llvm_out(target).join("lib")];
+            dylib_path.extend(helpers::dylib_path());
+            cfg.env(helpers::dylib_path_var(), t!(env::join_paths(dylib_path)));
+        }
+
+        cfg.out_dir(&out_dir)
+            .profile(profile)
+            .env("LLVM_CONFIG_REAL", &llvm_output.host_llvm_config)
+            .define("LLVM_ENABLE_RUNTIMES", "libc")
+            .define("LLVM_LIBC_FULL_BUILD", "ON")
+            .define("LLVM_DEFAULT_TARGET_TRIPLE", gpu_target)
+            .define("LLVM_RUNTIMES_TARGET", gpu_target)
+            .define("LLVM_ENABLE_PER_TARGET_RUNTIME_DIR", "ON")
+            .define("LLVM_ENABLE_ASSERTIONS", "ON")
+            .define("LLVM_INCLUDE_TESTS", "OFF")
+            .define("LLVM_ROOT", builder.llvm_out(target).join("build"))
+            .define("LLVM_DIR", llvm_output.cmake_dir())
+            .define("LIBC_NAMESPACE", format!("__llvm_libc_{llvm_version_major}"))
+            .define("CMAKE_C_COMPILER", &clang)
+            .define("CMAKE_CXX_COMPILER", &clangxx)
+            .define("CMAKE_C_COMPILER_TARGET", gpu_target)
+            .define("CMAKE_CXX_COMPILER_TARGET", gpu_target)
+            .define("CMAKE_C_COMPILER_WORKS", "ON")
+            .define("CMAKE_CXX_COMPILER_WORKS", "ON")
+            .define("CMAKE_ASM_COMPILER_WORKS", "ON")
+            .define("CMAKE_C_FLAGS", &program_flags)
+            .define("CMAKE_CXX_FLAGS", &program_flags);
+
+        if let Some(p) = &builder.config.offload_clang_dir {
+            cfg.define("Clang_DIR", p);
+        }
+
+        cfg.build();
+
+        for p in &files {
+            if !p.exists() {
+                eprintln!("Failed to build libc-for-gpu file: {p:?}, {}", out_dir.display());
+                helpers::exit_process(1);
+            }
+        }
+
+        t!(stamp.write());
+
+        BuiltGpuLibc { libs: files }
     }
 }
 
