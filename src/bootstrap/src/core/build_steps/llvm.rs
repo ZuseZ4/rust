@@ -29,6 +29,9 @@ use crate::utils::helpers::{
     self, exe, get_clang_cl_resource_dir, libdir, t, unhashed_basename, up_to_date,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Path where a file containing the link type (dynamic or static) is stored in the LLVM CI tarball.
 pub const LLVM_CI_LINK_TYPE_PATH: &str = "link-type.txt";
 
@@ -1085,6 +1088,88 @@ fn configure_llvm(builder: &Builder<'_>, target: TargetSelection, cfg: &mut cmak
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InTreeLld {
+    bin_dir: PathBuf,
+    dylib_dir: Option<PathBuf>,
+}
+
+fn in_tree_lld(
+    builder: &Builder<'_>,
+    target: TargetSelection,
+    llvm_output: &LlvmOutput,
+) -> Option<InTreeLld> {
+    if builder.config.llvm_use_linker.is_some()
+        || !builder.config.lld_enabled
+        || target.is_msvc()
+        || target.contains("apple")
+    {
+        return None;
+    }
+
+    let bin_dir = builder.ensure(Lld { target }).join("bin");
+    let ld_lld = bin_dir.join(exe("ld.lld", target));
+    if !ld_lld.exists() {
+        return None;
+    }
+
+    let dylib_dir = llvm_output.link_shared().then(|| llvm_output.root_dir().join("lib"));
+
+    let mut probe = command(&ld_lld);
+    probe.arg("--version");
+    if let Some(dir) = &dylib_dir {
+        probe.env(helpers::dylib_path_var(), t!(env::join_paths(prepend_dylib_path(dir))));
+    }
+    if !probe.allow_failure().cached().run_capture(builder).is_success() {
+        return None;
+    }
+
+    Some(InTreeLld { bin_dir, dylib_dir })
+}
+
+fn prepend_dylib_path(dir: &Path) -> Vec<PathBuf> {
+    let mut paths = helpers::dylib_path();
+    paths.insert(0, dir.to_path_buf());
+    paths
+}
+
+fn lld_search_path_flag(lld: &InTreeLld) -> OsString {
+    let mut flag = OsString::from("-B");
+    flag.push(&lld.bin_dir);
+    flag
+}
+
+fn subproject_linker_flags(
+    config: &Config,
+    target: TargetSelection,
+    lld: Option<&InTreeLld>,
+) -> Option<OsString> {
+    if let Some(linker) = &config.llvm_use_linker {
+        return Some(format!("-fuse-ld={linker}").into());
+    }
+
+    if let Some(lld) = lld {
+        let mut flags = lld_search_path_flag(lld);
+        flags.push(" -fuse-ld=lld");
+        return Some(flags);
+    }
+
+    // Logic copied from `configure_llvm`
+    // ThinLTO is only available when building with LLVM, enabling LLD is required.
+    // Apple's linker ld64 supports ThinLTO out of the box though, so don't use LLD on Darwin.
+    if config.llvm_thin_lto && !target.contains("apple") {
+        return Some("-fuse-ld=lld".into());
+    }
+
+    None
+}
+
+fn configure_lld_dylib_path(cfg: &mut cmake::Config, lld: Option<&InTreeLld>) {
+    if let Some(dir) = lld.and_then(|lld| lld.dylib_dir.as_deref()) {
+        cfg.env(helpers::dylib_path_var(), t!(env::join_paths(prepend_dylib_path(dir))));
+    }
+}
+
 // Adapted from https://github.com/alexcrichton/cc-rs/blob/fba7feded71ee4f63cfe885673ead6d7b4f2f454/src/lib.rs#L2347-L2365
 fn get_var(var_base: &str, host: &str, target: &str) -> Option<OsString> {
     let kind = if host == target { "HOST" } else { "TARGET" };
@@ -1150,15 +1235,14 @@ impl CommandLineStep for RustOffload {
         let mut cfg =
             cmake::Config::new(builder.src.join("compiler/rustc_llvm/llvm-wrapper/offload/"));
 
-        // Logic copied from `configure_llvm`
-        // ThinLTO is only available when building with LLVM, enabling LLD is required.
-        // Apple's linker ld64 supports ThinLTO out of the box though, so don't use LLD on Darwin.
+        let lld = in_tree_lld(builder, target, &llvm_output);
         let mut ldflags = LdFlags::default();
-        if builder.config.llvm_thin_lto && !target.contains("apple") {
-            ldflags.push_all("-fuse-ld=lld");
+        if let Some(flags) = subproject_linker_flags(&builder.config, target, lld.as_ref()) {
+            ldflags.push_all(flags);
         }
 
         configure_cmake(builder, target, &mut cfg, true, ldflags, CcFlags::default(), &[]);
+        configure_lld_dylib_path(&mut cfg, lld.as_ref());
 
         let profile = get_llvm_profile(&builder.config);
 
@@ -1378,6 +1462,9 @@ impl CommandLineStep for OmpOffload {
             libstdcxx.parent().map(Path::to_path_buf)
         });
 
+        let lld = in_tree_lld(builder, target, &llvm_output);
+        let linker_flags = subproject_linker_flags(&builder.config, target, lld.as_ref());
+
         // In the context of OpenMP offload, some libraries must be compiled for the gpu target,
         // some for the host, and others for both. We do not perform a full cross-compilation, since
         // we don't want to run rustc on a GPU.
@@ -1396,20 +1483,20 @@ impl CommandLineStep for OmpOffload {
                 cflags.push_all(format!(" -I {inc_dir}"));
             }
 
-            // Logic copied from `configure_llvm`
-            // ThinLTO is only available when building with LLVM, enabling LLD is required.
-            // Apple's linker ld64 supports ThinLTO out of the box though, so don't use LLD on Darwin.
             let mut ldflags = LdFlags::default();
-            if builder.config.llvm_thin_lto && !target.contains("apple") {
-                ldflags.push_all("-fuse-ld=lld");
-            }
-            if *omp_target == *target.triple
-                && let Some(dir) = &cxx_lib_dir
-            {
-                ldflags.push_all(format!("-L{}", dir.display()));
+            if *omp_target == *target.triple {
+                if let Some(flags) = &linker_flags {
+                    ldflags.push_all(flags);
+                }
+                if let Some(dir) = &cxx_lib_dir {
+                    ldflags.push_all(format!("-L{}", dir.display()));
+                }
+            } else if let Some(lld) = &lld {
+                ldflags.push_all(lld_search_path_flag(lld));
             }
 
             configure_cmake(builder, target, &mut cfg, true, ldflags, cflags, &[]);
+            configure_lld_dylib_path(&mut cfg, lld.as_ref());
 
             cfg.define("CMAKE_C_COMPILER", &clang)
                 .define("CMAKE_CXX_COMPILER", &clangxx)
@@ -1575,15 +1662,14 @@ impl CommandLineStep for Enzyme {
         let mut cflags = CcFlags::default();
         cflags.push_all("-Wno-deprecated");
 
-        // Logic copied from `configure_llvm`
-        // ThinLTO is only available when building with LLVM, enabling LLD is required.
-        // Apple's linker ld64 supports ThinLTO out of the box though, so don't use LLD on Darwin.
+        let lld = in_tree_lld(builder, target, &llvm_output);
         let mut ldflags = LdFlags::default();
-        if builder.config.llvm_thin_lto && !target.contains("apple") {
-            ldflags.push_all("-fuse-ld=lld");
+        if let Some(flags) = subproject_linker_flags(&builder.config, target, lld.as_ref()) {
+            ldflags.push_all(flags);
         }
 
         configure_cmake(builder, target, &mut cfg, true, ldflags, cflags, &[]);
+        configure_lld_dylib_path(&mut cfg, lld.as_ref());
 
         // Re-use the same flags as llvm to control the level of debug information
         // generated by Enzyme.
