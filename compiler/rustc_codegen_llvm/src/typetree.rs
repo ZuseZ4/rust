@@ -1,10 +1,13 @@
 use std::ffi::{CString, c_char};
 
+use rustc_abi as abi;
 use rustc_ast::expand::typetree::{FncTree, Kind, TypeTree as RustTypeTree};
+use rustc_codegen_ssa::traits::{BaseTypeCodegenMethods, ConstCodegenMethods};
+use rustc_session::config::AutoDiff;
 
 use crate::attributes;
-use crate::context::FullCx;
-use crate::llvm::{self, EnzymeWrapper, Value};
+use crate::context::{CodegenCx, FullCx};
+use crate::llvm::{self, EnzymeWrapper, TypeKind, Value};
 
 fn to_enzyme_typetree<'ll>(
     rust_typetree: &RustTypeTree,
@@ -177,4 +180,77 @@ pub(crate) fn add_tt<'tcx, 'll>(cx: &FullCx<'ll, 'tcx>, fn_def: Value<'ll>, tt: 
         }
         enzyme_wrapper.tree_to_string_free(c_str.as_ptr());
     }
+}
+
+/// Enzyme's name (`ConcreteType::str()`) for a scalar that is loaded or stored as `llty`.
+///
+/// A load or a store is a typed copy, so the operation may carry a type even though the memory
+/// it touches has none. `None` means the operation stays undescribed:
+/// - a union scalar (`MaybeUninit<T>`) may hold any bytes,
+/// - a one-byte integer is the type used for untyped byte copies,
+/// - `llty` must agree with the scalar, since the place type and the value can differ.
+fn scalar_concrete_type<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    scalar: abi::Scalar,
+    llty: llvm::Type<'ll>,
+) -> Option<&'static [u8]> {
+    let autodiff = &cx.tcx.sess.opts.unstable_opts.autodiff;
+    if !autodiff.contains(&AutoDiff::Enable) || autodiff.contains(&AutoDiff::NoTT) {
+        return None;
+    }
+    let abi::Scalar::Initialized { value, .. } = scalar else {
+        return None;
+    };
+    let kind = cx.type_kind(llty);
+    match value {
+        abi::Primitive::Float(abi::Float::F16) if kind == TypeKind::Half => Some(b"Float@half"),
+        abi::Primitive::Float(abi::Float::F32) if kind == TypeKind::Float => Some(b"Float@float"),
+        abi::Primitive::Float(abi::Float::F64) if kind == TypeKind::Double => Some(b"Float@double"),
+        abi::Primitive::Float(abi::Float::F128) if kind == TypeKind::FP128 => Some(b"Float@fp128"),
+        abi::Primitive::Int(int, _) if kind == TypeKind::Integer && int.size().bytes() > 1 => {
+            Some(b"Integer")
+        }
+        abi::Primitive::Pointer(_) if kind == TypeKind::Pointer => Some(b"Pointer"),
+        _ => None,
+    }
+}
+
+/// Attach `!enzyme_type` to a scalar load. It describes the loaded value, in the nested
+/// encoding of Enzyme's `TypeTree::toMD`.
+pub(crate) fn add_scalar_load_tt<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    load: Value<'ll>,
+    scalar: abi::Scalar,
+) {
+    let Some(name) = scalar_concrete_type(cx, scalar, cx.val_ty(load)) else {
+        return;
+    };
+    let leaf = cx.md_node_in_context(&[cx.create_metadata(name)]);
+    let any_offset = llvm::LLVMValueAsMetadata(cx.const_i32(-1));
+    cx.set_metadata_node(
+        load,
+        cx.get_md_kind_id("enzyme_type"),
+        &[cx.create_metadata(b"Unknown"), any_offset, leaf],
+    );
+}
+
+/// Attach `!enzyme_truetype` to a scalar store.
+///
+/// A store has no result, so `!enzyme_type` (which describes an instruction's result) can not be
+/// used. `!enzyme_truetype` describes the operation: a list of `(type, start offset)` runs.
+pub(crate) fn add_scalar_store_tt<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    store: Value<'ll>,
+    val: Value<'ll>,
+    scalar: abi::Scalar,
+) {
+    let Some(name) = scalar_concrete_type(cx, scalar, cx.val_ty(val)) else {
+        return;
+    };
+    let start = llvm::LLVMValueAsMetadata(cx.const_i64(0));
+    cx.set_metadata_node(
+        store,
+        cx.get_md_kind_id("enzyme_truetype"),
+        &[cx.create_metadata(name), start],
+    );
 }

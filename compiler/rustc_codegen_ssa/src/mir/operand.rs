@@ -1046,23 +1046,34 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
             }
             OperandValue::Immediate(s) => {
                 let val = bx.from_immediate(s);
-                bx.store_with_flags(val, dest.val.llval, dest.val.align, flags);
+                let scalar = match dest.layout.backend_repr {
+                    BackendRepr::Scalar(scalar) => Some(scalar),
+                    _ => None,
+                };
+                bx.typed_store_with_flags(val, dest.val.llval, dest.val.align, flags, scalar);
             }
             OperandValue::Pair(a, b) => {
-                let BackendRepr::ScalarPair { a: _, b: _, b_offset } = dest.layout.backend_repr
+                let BackendRepr::ScalarPair { a: a_scalar, b: b_scalar, b_offset } =
+                    dest.layout.backend_repr
                 else {
                     bug!("store_with_flags: invalid ScalarPair layout: {:#?}", dest.layout);
                 };
 
                 let val = bx.from_immediate(a);
                 let align = dest.val.align;
-                bx.store_with_flags(val, dest.val.llval, align, flags);
+                bx.typed_store_with_flags(val, dest.val.llval, align, flags, Some(a_scalar));
 
                 let llptr = bx.inbounds_ptradd(dest.val.llval, bx.const_usize(b_offset.bytes()));
                 let val = bx.from_immediate(b);
                 let align = dest.val.align.restrict_for_offset(b_offset);
                 // The CAPTURES_READ_ONLY flag only applies to the first element.
-                bx.store_with_flags(val, llptr, align, flags & !MemFlags::CAPTURES_READ_ONLY);
+                bx.typed_store_with_flags(
+                    val,
+                    llptr,
+                    align,
+                    flags & !MemFlags::CAPTURES_READ_ONLY,
+                    Some(b_scalar),
+                );
             }
         }
     }

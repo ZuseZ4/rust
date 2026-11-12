@@ -333,6 +333,18 @@ pub trait BuilderMethods<'a, 'tcx>:
         align: Align,
         flags: MemFlags,
     );
+    /// Like `store_with_flags`, for a store that writes a whole value of the scalar type `scalar`.
+    /// A backend may use the type to describe the store, for example to autodiff.
+    fn typed_store_with_flags(
+        &mut self,
+        val: Self::Value,
+        ptr: Self::Value,
+        align: Align,
+        flags: MemFlags,
+        _scalar: Option<Scalar>,
+    ) {
+        self.store_with_flags(val, ptr, align, flags)
+    }
     fn store_to_place_with_flags(
         &mut self,
         val: Self::Value,
