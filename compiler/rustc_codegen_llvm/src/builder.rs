@@ -809,6 +809,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             let llval = const_llval.unwrap_or_else(|| {
                 let load = self.load(llty, place.val.llval, place.val.align);
                 if let abi::BackendRepr::Scalar(scalar) = place.layout.backend_repr {
+                    crate::typetree::add_scalar_load_tt(self.cx, load, scalar);
                     scalar_load_metadata(self, load, scalar, place.layout, Size::ZERO);
                     self.to_immediate_scalar(load, scalar)
                 } else {
@@ -825,6 +826,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 };
                 let llty = place.layout.scalar_pair_element_llvm_type(self, i, false);
                 let load = self.load(llty, llptr, align);
+                crate::typetree::add_scalar_load_tt(self.cx, load, scalar);
                 scalar_load_metadata(self, load, scalar, layout, offset);
                 self.to_immediate_scalar(load, scalar)
             };
@@ -885,10 +887,24 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         align: Align,
         flags: MemFlags,
     ) {
+        self.typed_store_with_flags(val, ptr, align, flags, None)
+    }
+
+    fn typed_store_with_flags(
+        &mut self,
+        val: Value<'ll>,
+        ptr: Value<'ll>,
+        align: Align,
+        flags: MemFlags,
+        scalar: Option<abi::Scalar>,
+    ) {
         debug!("Store {:?} -> {:?} ({:?})", val, ptr, flags);
         assert_eq!(self.cx.type_kind(self.cx.val_ty(ptr)), TypeKind::Pointer);
         unsafe {
             let store = llvm::LLVMBuildStore(self.llbuilder(), val, ptr);
+            if let Some(scalar) = scalar {
+                crate::typetree::add_scalar_store_tt(self.cx, store, val, scalar);
+            }
             let align = align.min(self.cx().tcx.sess.target.max_reliable_alignment());
             let align = align.bytes() as c_uint;
             llvm::LLVMSetAlignment(store, align);
